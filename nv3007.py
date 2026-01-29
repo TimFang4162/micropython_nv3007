@@ -2,8 +2,8 @@
 NV3007 LCD Driver for Raspberry Pi Pico / MicroPython
 """
 
-import machine
 import time
+import math
 from machine import SPI, Pin
 
 
@@ -54,13 +54,18 @@ class NV3007:
         self.blk = blk if isinstance(blk, Pin) else Pin(blk, Pin.OUT, value=0)
 
         self.rotation = rotation
-        # 根据旋转方向设置实际的宽高
         if rotation == 0 or rotation == 1:
             self.width = width
             self.height = height
         else:
             self.width = height
             self.height = width
+
+        self._fb_width = width
+        self._fb_height = height
+        self._framebuffer = bytearray(self._fb_width * self._fb_height * 2)
+        self._fb_dirty = True
+        self._auto_flush = True
 
         self._init_display()
 
@@ -80,7 +85,7 @@ class NV3007:
         self.cs.value(1)
 
     def _write_data16(self, dat):
-        """写16位数据"""
+        """写16位（半字）数据"""
         self.dc.value(1)
         self.cs.value(0)
         self.spi.write(bytes([(dat >> 8) & 0xFF, dat & 0xFF]))
@@ -92,6 +97,39 @@ class NV3007:
         self.cs.value(0)
         self.spi.write(buffer)
         self.cs.value(1)
+
+    def _fb_set_pixel(self, x, y, color):
+        """在framebuffer中设置像素点"""
+        if x < 0 or x >= self._fb_width or y < 0 or y >= self._fb_height:
+            return
+        offset = (y * self._fb_width + x) * 2
+        self._framebuffer[offset] = (color >> 8) & 0xFF
+        self._framebuffer[offset + 1] = color & 0xFF
+        self._fb_dirty = True
+
+    def _fb_fill_rect(self, x, y, w, h, color):
+        """在framebuffer中填充矩形"""
+        if x < 0:
+            w += x
+            x = 0
+        if y < 0:
+            h += y
+            y = 0
+        if x + w > self._fb_width:
+            w = self._fb_width - x
+        if y + h > self._fb_height:
+            h = self._fb_height - y
+        if w <= 0 or h <= 0:
+            return
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+        for py in range(y, y + h):
+            offset = (py * self._fb_width + x) * 2
+            for px in range(w):
+                self._framebuffer[offset] = color_hi
+                self._framebuffer[offset + 1] = color_lo
+                offset += 2
+        self._fb_dirty = True
 
     def _set_address(self, xs, ys, xe, ye):
         """设置显示区域"""
@@ -412,40 +450,40 @@ class NV3007:
         self._write_reg(0x29)
         time.sleep_ms(200)
 
+    def flush(self):
+        """将framebuffer内容提交到屏幕"""
+        if not self._fb_dirty:
+            return
+        self._set_address(0, 0, self.width - 1, self.height - 1)
+        chunk_size = 2048
+        for i in range(0, len(self._framebuffer), chunk_size):
+            chunk = self._framebuffer[i : i + chunk_size]
+            self._write_buffer(chunk)
+        self._fb_dirty = False
+
+    def set_auto_flush(self, enable):
+        """设置自动刷新模式"""
+        self._auto_flush = enable
+
     def clear(self, color=WHITE):
         """清屏"""
-        self.fill(0, 0, self.width, self.height, color)
+        self.draw_rect(0, 0, self.width, self.height, color, filled=True)
 
-    def fill(self, x, y, w, h, color):
-        """填充矩形区域"""
-        self._set_address(x, y, x + w - 1, y + h - 1)
-        num_pixels = w * h
-        color_hi = (color >> 8) & 0xFF
-        color_lo = color & 0xFF
-        buffer = bytes([color_hi, color_lo]) * min(num_pixels, 2048)
-        pixels_sent = 0
-        while pixels_sent < num_pixels:
-            chunk_size = min(2048, num_pixels - pixels_sent)
-            self._write_buffer(buffer[: chunk_size * 2])
-            pixels_sent += chunk_size
+    def draw_pixel(self, x, y, color):
+        """画像素点"""
+        self._fb_set_pixel(x, y, color)
+        if self._auto_flush:
+            self.flush()
 
-    def pixel(self, x, y, color):
-        """画点"""
-        if x < 0 or x >= self.width or y < 0 or y >= self.height:
-            return
-        self._set_address(x, y, x, y)
-        self._write_data16(color)
-
-    def line(self, x1, y1, x2, y2, color):
-        """画线"""
+    def draw_line(self, x1, y1, x2, y2, color):
+        """画直线（Bresenham算法优化）"""
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
         err = dx - dy
-
         while True:
-            self.pixel(x1, y1, color)
+            self._fb_set_pixel(x1, y1, color)
             if x1 == x2 and y1 == y2:
                 break
             e2 = 2 * err
@@ -455,25 +493,97 @@ class NV3007:
             if e2 < dx:
                 err += dx
                 y1 += sy
+        if self._auto_flush:
+            self.flush()
 
-    def rect(self, x, y, w, h, color):
-        """画空心矩形"""
-        self.line(x, y, x + w - 1, y, color)
-        self.line(x, y, x, y + h - 1, color)
-        self.line(x + w - 1, y, x + w - 1, y + h - 1, color)
-        self.line(x, y + h - 1, x + w - 1, y + h - 1, color)
+    def draw_rect(self, x, y, w, h, color, radius=0, filled=False):
+        """画矩形/圆角矩形（统一接口）
 
-    def fill_rect(self, x, y, w, h, color):
-        """画实心矩形"""
-        self.fill(x, y, w, h, color)
+        参数:
+            x, y: 起始坐标
+            w, h: 宽度和高度
+            color: 颜色
+            radius: 圆角半径（0为普通矩形）
+            filled: 是否填充
+        """
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
 
-    def circle(self, xc, yc, r, color, filled=False):
-        """画圆"""
+        if radius <= 0:
+            if filled:
+                self._fb_fill_rect(x, y, w, h, color)
+            else:
+                for i in range(w):
+                    self._fb_set_pixel(x + i, y, color)
+                    self._fb_set_pixel(x + i, y + h - 1, color)
+                for i in range(h):
+                    self._fb_set_pixel(x, y + i, color)
+                    self._fb_set_pixel(x + w - 1, y + i, color)
+        else:
+            r = min(radius, w // 2, h // 2)
+            if filled:
+                self._fb_fill_rect(x, y + r, w, h - 2 * r, color)
+                self._fb_fill_rect(x + r, y, w - 2 * r, h, color)
+            else:
+                for i in range(w - 2 * r):
+                    self._fb_set_pixel(x + r + i, y, color)
+                    self._fb_set_pixel(x + r + i, y + h - 1, color)
+                for i in range(h - 2 * r):
+                    self._fb_set_pixel(x, y + r + i, color)
+                    self._fb_set_pixel(x + w - 1, y + r + i, color)
+            self._draw_circle_quadrant(x + r, y + r, r, -1, -1, color, filled)
+            self._draw_circle_quadrant(x + w - 1 - r, y + r, r, 1, -1, color, filled)
+            self._draw_circle_quadrant(x + r, y + h - 1 - r, r, -1, 1, color, filled)
+            self._draw_circle_quadrant(
+                x + w - 1 - r, y + h - 1 - r, r, 1, 1, color, filled
+            )
+
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
+
+    def _draw_circle_quadrant(self, xc, yc, r, x_sign, y_sign, color, filled):
+        """画圆的特定象限（用于圆角矩形）
+
+        参数:
+            xc, yc: 圆心坐标
+            r: 半径
+            x_sign: x方向符号（1或-1）
+            y_sign: y方向符号（1或-1）
+            color: 颜色
+            filled: 是否填充
+        """
+        if not filled:
+            x = 0
+            y = r
+            d = 3 - 2 * r
+            while y >= x:
+                self._fb_set_pixel(xc + x * x_sign, yc + y * y_sign, color)
+                self._fb_set_pixel(xc + y * x_sign, yc + x * y_sign, color)
+                x += 1
+                if d > 0:
+                    y -= 1
+                    d = d + 4 * (x - y) + 10
+                else:
+                    d = d + 4 * x + 6
+        else:
+            x_start = xc if x_sign > 0 else xc - r
+            x_end = xc + r if x_sign > 0 else xc
+            y_start = yc if y_sign > 0 else yc - r
+            y_end = yc + r if y_sign > 0 else yc
+            for py in range(y_start, y_end + 1):
+                for px in range(x_start, x_end + 1):
+                    dx = abs(px - xc)
+                    dy = abs(py - yc)
+                    if dx * dx + dy * dy <= r * r:
+                        self._fb_set_pixel(px, py, color)
+
+    def draw_circle(self, xc, yc, r, color, filled=False):
+        """画圆（Bresenham算法优化）"""
         x = 0
         y = r
         d = 3 - 2 * r
         points = []
-
         while y >= x:
             points.extend(
                 [
@@ -493,50 +603,188 @@ class NV3007:
                 d = d + 4 * (x - y) + 10
             else:
                 d = d + 4 * x + 6
-
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
         for px, py in points:
             if filled:
-                self.line(xc, yc, px, py, color)
+                dx = abs(px - xc)
+                dy = abs(py - yc)
+                sx = 1 if xc < px else -1
+                sy = 1 if yc < py else -1
+                err = dx - dy
+                x1, y1 = xc, yc
+                while True:
+                    self._fb_set_pixel(x1, y1, color)
+                    if x1 == px and y1 == py:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        x1 += sx
+                    if e2 < dx:
+                        err += dx
+                        y1 += sy
             else:
-                self.pixel(px, py, color)
+                self._fb_set_pixel(px, py, color)
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
 
-    def fill_circle(self, xc, yc, r, color):
-        """画实心圆"""
-        self.circle(xc, yc, r, color, filled=True)
-
-    def triangle(self, x1, y1, x2, y2, x3, y3, color, filled=False):
-        """画三角形"""
+    def draw_arc(self, xc, yc, r, start_angle, end_angle, color, filled=False):
+        """画弧（使用多边形近似）"""
+        points = []
+        steps = max(1, int(r * 2 * 3.14159 / 5))
+        for i in range(steps + 1):
+            angle = start_angle + (end_angle - start_angle) * i / steps
+            px = int(xc + r * math.cos(angle))
+            py = int(yc + r * math.sin(angle))
+            points.append((px, py))
         if filled:
-            self.line(x1, y1, x2, y2, color)
-            self.line(x2, y2, x3, y3, color)
-            self.line(x3, y3, x1, y1, color)
-            min_x = min(x1, x2, x3)
-            max_x = max(x1, x2, x3)
-            min_y = min(y1, y2, y3)
-            max_y = max(y1, y2, y3)
+            points.append((xc, yc))
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
+        for i in range(len(points) - 1):
+            px1, py1 = points[i]
+            px2, py2 = points[i + 1]
+            dx = abs(px2 - px1)
+            dy = abs(py2 - py1)
+            sx = 1 if px1 < px2 else -1
+            sy = 1 if py1 < py2 else -1
+            err = dx - dy
+            while True:
+                self._fb_set_pixel(px1, py1, color)
+                if px1 == px2 and py1 == py2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    px1 += sx
+                if e2 < dx:
+                    err += dx
+                    py1 += sy
+        if filled:
+            self.draw_polygon(points, color, filled=True)
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
+
+    def draw_ellipse(self, xc, yc, rx, ry, color, filled=False):
+        """画椭圆（使用扫描线算法优化填充）"""
+        points = []
+        steps = max(1, int(max(rx, ry) * 2 * 3.14159 / 5))
+        for i in range(steps):
+            angle = 2 * 3.14159 * i / steps
+            px = int(xc + rx * math.cos(angle))
+            py = int(yc + ry * math.sin(angle))
+            points.append((px, py))
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
+        if filled:
+            min_y = min(v[1] for v in points)
+            max_y = max(v[1] for v in points)
             for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    if self._point_in_triangle(x, y, x1, y1, x2, y2, x3, y3):
-                        self.pixel(x, y, color)
+                intersections = []
+                for i in range(len(points)):
+                    x1, y1 = points[i]
+                    x2, y2 = points[(i + 1) % len(points)]
+                    if (y1 <= y < y2) or (y2 <= y < y1):
+                        if y1 != y2:
+                            x = x1 + (y - y1) * (x2 - x1) // (y2 - y1)
+                            intersections.append(x)
+                intersections.sort()
+                for i in range(0, len(intersections), 2):
+                    if i + 1 < len(intersections):
+                        x_start = intersections[i]
+                        x_end = intersections[i + 1]
+                        for x in range(x_start, x_end + 1):
+                            self._fb_set_pixel(x, y, color)
         else:
-            self.line(x1, y1, x2, y2, color)
-            self.line(x2, y2, x3, y3, color)
-            self.line(x3, y3, x1, y1, color)
+            for i in range(len(points)):
+                self._fb_set_pixel(points[i][0], points[i][1], color)
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
 
-    def _point_in_triangle(self, px, py, x1, y1, x2, y2, x3, y3):
-        """判断点是否在三角形内"""
+    def draw_triangle(self, x1, y1, x2, y2, x3, y3, color, filled=False):
+        """画三角形"""
+        self.draw_polygon([(x1, y1), (x2, y2), (x3, y3)], color, filled)
 
-        def sign(p1x, p1y, p2x, p2y, p3x, p3y):
-            return (p1x - p3x) * (p2y - p3y) - (p2x - p3x) * (p1y - p3y)
+    def draw_polygon(self, vertices, color, filled=False):
+        """画多边形（使用扫描线算法优化填充）"""
+        n = len(vertices)
+        if n < 3:
+            return
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
+        if not filled:
+            for i in range(n):
+                x1, y1 = vertices[i]
+                x2, y2 = vertices[(i + 1) % n]
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                sx = 1 if x1 < x2 else -1
+                sy = 1 if y1 < y2 else -1
+                err = dx - dy
+                while True:
+                    self._fb_set_pixel(x1, y1, color)
+                    if x1 == x2 and y1 == y2:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        x1 += sx
+                    if e2 < dx:
+                        err += dx
+                        y1 += sy
+        else:
+            min_y = min(v[1] for v in vertices)
+            max_y = max(v[1] for v in vertices)
+            for y in range(min_y, max_y + 1):
+                intersections = []
+                for i in range(n):
+                    x1, y1 = vertices[i]
+                    x2, y2 = vertices[(i + 1) % n]
+                    if (y1 <= y < y2) or (y2 <= y < y1):
+                        if y1 != y2:
+                            x = x1 + (y - y1) * (x2 - x1) // (y2 - y1)
+                            intersections.append(x)
+                intersections.sort()
+                for i in range(0, len(intersections), 2):
+                    if i + 1 < len(intersections):
+                        x_start = intersections[i]
+                        x_end = intersections[i + 1]
+                        for x in range(x_start, x_end + 1):
+                            self._fb_set_pixel(x, y, color)
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
 
-        d1 = sign(px, py, x1, y1, x2, y2)
-        d2 = sign(px, py, x2, y2, x3, y3)
-        d3 = sign(px, py, x3, y3, x1, y1)
+    def draw_bitmap(self, x, y, bitmap, w, h, color):
+        """画位图（使用像素点）"""
+        if not isinstance(bitmap, bytes):
+            bitmap = bytes(bitmap)
+        rows = (h + 7) // 8
+        for row in range(h):
+            for col in range(w):
+                byte_index = (row // 8) * w + col
+                bit_index = 7 - (row % 8)
+                if byte_index < len(bitmap) and (bitmap[byte_index] >> bit_index) & 1:
+                    self._fb_set_pixel(x + col, y + row, color)
+        if self._auto_flush:
+            self.flush()
 
-        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-
-        return not (has_neg and has_pos)
+    def draw_bitmap_rgb565(self, x, y, bitmap, w, h):
+        """画RGB565位图"""
+        if not isinstance(bitmap, bytes):
+            bitmap = bytes(bitmap)
+        for row in range(h):
+            for col in range(w):
+                index = (row * w + col) * 2
+                if index + 1 < len(bitmap):
+                    color = (bitmap[index] << 8) | bitmap[index + 1]
+                    self._fb_set_pixel(x + col, y + row, color)
+        if self._auto_flush:
+            self.flush()
 
     def set_backlight(self, value):
         """设置背光亮度 (0-1)"""
@@ -557,45 +805,3 @@ class NV3007:
         self._write_reg(0x11)
         time.sleep_ms(120)
         self._write_reg(0x29)
-
-
-def create(
-    width=142,
-    height=428,
-    rotation=0,
-    spi_id=0,
-    sck=18,
-    mosi=19,
-    cs=17,
-    dc=20,
-    rst=21,
-    blk=14,
-):
-    """
-    创建NV3007实例的便捷函数
-
-    参数:
-        width: 屏幕宽度 (默认142)
-        height: 屏幕高度 (默认428)
-        rotation: 旋转方向 0-3 (默认0) 0或1为竖屏 2或3为横屏
-        spi_id: SPI总线ID (默认0)
-        sck: SCK引脚号 (默认18)
-        mosi: MOSI引脚号 (默认19)
-        cs: CS引脚号 (默认17)
-        dc: DC引脚号 (默认20)
-        rst: RST引脚号 (默认21)
-        blk: 背光引脚号 (默认14)
-
-    返回:
-        NV3007实例
-    """
-    spi = SPI(
-        spi_id,
-        baudrate=100_000_000,
-        polarity=1,
-        phase=1,
-        bits=8,
-        sck=Pin(sck),
-        mosi=Pin(mosi),
-    )
-    return NV3007(spi, cs, dc, rst, blk, width, height, rotation)
