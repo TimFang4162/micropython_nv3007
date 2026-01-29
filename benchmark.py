@@ -6,7 +6,6 @@ NV3007 LCD 绘制性能基准测试
 from nv3007 import NV3007
 import time
 from machine import Pin, SPI
-
 # 创建屏幕实例
 spi = SPI(
     0,
@@ -129,7 +128,7 @@ benchmark_compare(
     "绘制100个像素点",
     lambda: (lcd.set_auto_flush(True), test_100_pixels())[1],
     lambda: (lcd.set_auto_flush(False), test_100_pixels(), lcd.flush())[2],
-    iterations=20,
+    iterations=5,
     setup_func=setup_100_pixels
 )
 
