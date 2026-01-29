@@ -53,9 +53,14 @@ class NV3007:
         self.rst = rst if isinstance(rst, Pin) else Pin(rst, Pin.OUT, value=1)
         self.blk = blk if isinstance(blk, Pin) else Pin(blk, Pin.OUT, value=0)
         
-        self.width = width
-        self.height = height
         self.rotation = rotation
+        # 根据旋转方向设置实际的宽高
+        if rotation == 0 or rotation == 1:
+            self.width = width
+            self.height = height
+        else:
+            self.width = height
+            self.height = width
         
         self._init_display()
     
