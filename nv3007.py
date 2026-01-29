@@ -160,6 +160,29 @@ class NV3007:
         self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
         self._fb_dirty = True
 
+    def _fb_fill_v_line(self, x, y1, y2, color):
+        """快速填充垂直线（优化版）"""
+        if x < 0 or x >= self._fb_width:
+            return
+        if y1 > y2:
+            y1, y2 = y2, y1
+        if y1 < 0:
+            y1 = 0
+        if y2 >= self._fb_height:
+            y2 = self._fb_height - 1
+        if y1 > y2:
+            return
+
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+
+        for py in range(y1, y2 + 1):
+            offset = (py * self._fb_width + x) * 2
+            self._framebuffer[offset] = color_hi
+            self._framebuffer[offset + 1] = color_lo
+
+        self._fb_dirty = True
+
     def _set_address(self, xs, ys, xe, ye):
         """设置显示区域"""
         if self.rotation == 0:
@@ -546,9 +569,8 @@ class NV3007:
             else:
                 self._fb_fill_h_line(x, x + w - 1, y, color)
                 self._fb_fill_h_line(x, x + w - 1, y + h - 1, color)
-                for i in range(h):
-                    self._fb_set_pixel_unsafe(x, y + i, color)
-                    self._fb_set_pixel_unsafe(x + w - 1, y + i, color)
+                self._fb_fill_v_line(x, y, y + h - 1, color)
+                self._fb_fill_v_line(x + w - 1, y, y + h - 1, color)
         else:
             r = min(radius, w // 2, h // 2)
             if filled:
@@ -557,9 +579,8 @@ class NV3007:
             else:
                 self._fb_fill_h_line(x + r, x + w - 1 - r, y, color)
                 self._fb_fill_h_line(x + r, x + w - 1 - r, y + h - 1, color)
-                for i in range(y + r, y + h - r):
-                    self._fb_set_pixel_unsafe(x, i, color)
-                    self._fb_set_pixel_unsafe(x + w - 1, i, color)
+                self._fb_fill_v_line(x, y + r, y + h - 1 - r, color)
+                self._fb_fill_v_line(x + w - 1, y + r, y + h - 1 - r, color)
             self._draw_circle_quadrant(x + r, y + r, r, -1, -1, color, filled)
             self._draw_circle_quadrant(x + w - 1 - r, y + r, r, 1, -1, color, filled)
             self._draw_circle_quadrant(x + r, y + h - 1 - r, r, -1, 1, color, filled)
@@ -615,49 +636,57 @@ class NV3007:
                         self._fb_fill_h_line(x_start, x_end, py, color)
 
     def draw_circle(self, xc, yc, r, color, filled=False):
-        """画圆（优化版）"""
+        """画圆（极致优化版）"""
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
         if filled:
             y_start = max(0, yc - r)
             y_end = min(yc + r, self._fb_height - 1)
+
+            color_hi = (color >> 8) & 0xFF
+            color_lo = color & 0xFF
+            r2 = r * r
+
             for py in range(y_start, y_end + 1):
                 dy = py - yc
                 dy2 = dy * dy
-                dx_max = int(math.sqrt(r * r - dy2))
-                if dy2 <= r * r:
+                if dy2 <= r2:
+                    dx_max = int(math.sqrt(r2 - dy2))
                     x_start = max(0, xc - dx_max)
                     x_end = min(xc + dx_max, self._fb_width - 1)
                     if x_start <= x_end:
-                        self._fb_fill_h_line(x_start, x_end, py, color)
+                        w = x_end - x_start + 1
+                        offset = (py * self._fb_width + x_start) * 2
+                        self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+            self._fb_dirty = True
         else:
             x = 0
             y = r
             d = 3 - 2 * r
+
             while y >= x:
-                if 0 <= xc + x < self._fb_width and 0 <= yc + y < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc + x, yc + y, color)
-                if 0 <= xc - x < self._fb_width and 0 <= yc + y < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc - x, yc + y, color)
-                if 0 <= xc + x < self._fb_width and 0 <= yc - y < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc + x, yc - y, color)
-                if 0 <= xc - x < self._fb_width and 0 <= yc - y < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc - x, yc - y, color)
-                if 0 <= xc + y < self._fb_width and 0 <= yc + x < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc + y, yc + x, color)
-                if 0 <= xc - y < self._fb_width and 0 <= yc + x < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc - y, yc + x, color)
-                if 0 <= xc + y < self._fb_width and 0 <= yc - x < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc + y, yc - x, color)
-                if 0 <= xc - y < self._fb_width and 0 <= yc - x < self._fb_height:
-                    self._fb_set_pixel_unsafe(xc - y, yc - x, color)
+                points = [
+                    (xc + x, yc + y), (xc - x, yc + y),
+                    (xc + x, yc - y), (xc - x, yc - y),
+                    (xc + y, yc + x), (xc - y, yc + x),
+                    (xc + y, yc - x), (xc - y, yc - x)
+                ]
+
+                for px, py in points:
+                    if 0 <= px < self._fb_width and 0 <= py < self._fb_height:
+                        offset = (py * self._fb_width + px) * 2
+                        self._framebuffer[offset] = (color >> 8) & 0xFF
+                        self._framebuffer[offset + 1] = color & 0xFF
+
                 x += 1
                 if d > 0:
                     y -= 1
                     d = d + 4 * (x - y) + 10
                 else:
                     d = d + 4 * x + 6
+
+            self._fb_dirty = True
 
         self._auto_flush = old_auto_flush
         if self._auto_flush:
@@ -703,21 +732,30 @@ class NV3007:
             self.flush()
 
     def draw_ellipse(self, xc, yc, rx, ry, color, filled=False):
-        """画椭圆（优化版）"""
+        """画椭圆（极致优化版）"""
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
         if filled:
             y_start = max(0, yc - ry)
             y_end = min(yc + ry, self._fb_height - 1)
+
+            color_hi = (color >> 8) & 0xFF
+            color_lo = color & 0xFF
+            ry2 = ry * ry
+
             for py in range(y_start, y_end + 1):
                 dy = py - yc
-                if dy * dy <= ry * ry:
-                    dx_max = int(rx * math.sqrt(1 - dy * dy / (ry * ry)))
+                dy2 = dy * dy
+                if dy2 <= ry2:
+                    dx_max = int(rx * math.sqrt(1 - dy2 / ry2))
                     x_start = max(0, xc - dx_max)
                     x_end = min(xc + dx_max, self._fb_width - 1)
                     if x_start <= x_end:
-                        self._fb_fill_h_line(x_start, x_end, py, color)
+                        w = x_end - x_start + 1
+                        offset = (py * self._fb_width + x_start) * 2
+                        self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+            self._fb_dirty = True
         else:
             steps = max(1, int(max(rx, ry) * 2 * 3.14159 / 5))
             for i in range(steps):
@@ -725,7 +763,10 @@ class NV3007:
                 px = int(xc + rx * math.cos(angle))
                 py = int(yc + ry * math.sin(angle))
                 if 0 <= px < self._fb_width and 0 <= py < self._fb_height:
-                    self._fb_set_pixel_unsafe(px, py, color)
+                    offset = (py * self._fb_width + px) * 2
+                    self._framebuffer[offset] = (color >> 8) & 0xFF
+                    self._framebuffer[offset + 1] = color & 0xFF
+            self._fb_dirty = True
 
         self._auto_flush = old_auto_flush
         if self._auto_flush:
@@ -764,8 +805,12 @@ class NV3007:
                         err += dx
                         y1 += sy
         else:
-            min_y = min(v[1] for v in vertices)
-            max_y = max(v[1] for v in vertices)
+            min_y = max(0, min(v[1] for v in vertices))
+            max_y = min(max(v[1] for v in vertices), self._fb_height - 1)
+
+            color_hi = (color >> 8) & 0xFF
+            color_lo = color & 0xFF
+
             for y in range(min_y, max_y + 1):
                 intersections = []
                 for i in range(n):
@@ -780,8 +825,12 @@ class NV3007:
                     if i + 1 < len(intersections):
                         x_start = max(0, min(intersections[i], self._fb_width - 1))
                         x_end = max(0, min(intersections[i + 1], self._fb_width - 1))
-                        if x_start <= x_end and 0 <= y < self._fb_height:
-                            self._fb_fill_h_line(x_start, x_end, y, color)
+                        if x_start <= x_end:
+                            w = x_end - x_start + 1
+                            offset = (y * self._fb_width + x_start) * 2
+                            self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+
+            self._fb_dirty = True
         self._auto_flush = old_auto_flush
         if self._auto_flush:
             self.flush()
