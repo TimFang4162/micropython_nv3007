@@ -2,7 +2,7 @@
 Datasheet: https://admin.osptek.com/uploads/NV_3007_Datasheet_V1_0_20240619_2_8a0a34f8c5.pdf  
 根据商家给的stm32示例代码修改
 
-![](img1.jpg)
+![](image.png)
 
 ## Files
 - `nv3007.py` - 主驱动模块
