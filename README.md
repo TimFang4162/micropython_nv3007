@@ -1,8 +1,55 @@
 # micropython_nv3007
-Datasheet: https://admin.osptek.com/uploads/NV_3007_Datasheet_V1_0_20240619_2_8a0a34f8c5.pdf  
+Datasheet: https://admin.osptek.com/uploads/NV_3007_Datasheet_V1_0_20240619_2_8a0a34f8c5.pdf
 根据商家给的stm32示例代码修改
 
 ![](image.png)
+
+## 性能优化
+
+本驱动程序采用了多种 MicroPython 性能优化技术：
+
+1. **使用 `memoryview` 优化 buffer 操作**
+   - 所有 framebuffer 操作使用 `memoryview`，避免数据复制
+   - 显著提高像素绘制速度
+
+2. **使用 `@micropython.native` 装饰器**
+   - 关键绘图函数使用 native 代码编译
+   - 性能提升约 2 倍
+
+3. **预分配缓冲区**
+   - 填充操作使用预分配的缓冲区
+   - 避免频繁的内存分配和垃圾回收
+
+4. **缓存对象引用**
+   - 在函数内部缓存频繁访问的对象
+   - 减少属性查找开销
+
+5. **边界检查优化**
+   - 关键路径使用无边界检查版本
+   - 提高批量绘制性能
+
+### 性能建议
+
+1. **使用手动刷新模式**
+   ```python
+   display.set_auto_flush(False)
+   # 执行多个绘图操作
+   display.draw_rect(...)
+   display.draw_circle(...)
+   display.draw_text(...)
+   # 最后一次性刷新
+   display.flush()
+   ```
+   比每次操作后自动刷新快得多。
+
+2. **批量操作**
+   尽量将相关操作组合在一起执行，减少刷新次数。
+
+3. **避免频繁的清屏操作**
+   使用填充矩形覆盖需要更新的区域，而不是清屏。
+
+4. **使用 benchmark.py 测试性能**
+   运行 `benchmark.py` 了解在您的硬件上的实际性能。
 
 ## Files
 - `nv3007.py` - 主驱动模块

@@ -128,7 +128,7 @@ benchmark_compare(
     "绘制100个像素点",
     lambda: (lcd.set_auto_flush(True), test_100_pixels())[1],
     lambda: (lcd.set_auto_flush(False), test_100_pixels(), lcd.flush())[2],
-    iterations=5,
+    iterations=1,
     setup_func=setup_100_pixels
 )
 

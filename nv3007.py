@@ -4,8 +4,9 @@ NV3007 LCD Driver for Raspberry Pi Pico / MicroPython
 
 import time
 import math
+import gc
+import micropython
 from machine import SPI, Pin
-
 
 class NV3007:
     """NV3007 LCD driver class"""
@@ -64,6 +65,9 @@ class NV3007:
         self._fb_width = self.width
         self._fb_height = self.height
         self._framebuffer = bytearray(self._fb_width * self._fb_height * 2)
+        self._fb_mv = memoryview(self._framebuffer)
+        self._fill_buffer = bytearray(self._fb_width * 2)
+        self._fill_mv = memoryview(self._fill_buffer)
         self._fb_dirty = True
         self._auto_flush = True
         self._font = None
@@ -111,10 +115,12 @@ class NV3007:
     def _fb_set_pixel_unsafe(self, x, y, color):
         """在framebuffer中设置像素点（无边界检查，性能优化版本）"""
         offset = (y * self._fb_width + x) * 2
-        self._framebuffer[offset] = (color >> 8) & 0xFF
-        self._framebuffer[offset + 1] = color & 0xFF
+        fb = self._fb_mv
+        fb[offset] = (color >> 8) & 0xFF
+        fb[offset + 1] = color & 0xFF
         self._fb_dirty = True
 
+    @micropython.native
     def _fb_fill_rect(self, x, y, w, h, color):
         """在framebuffer中填充矩形（优化版）"""
         if x < 0:
@@ -133,13 +139,20 @@ class NV3007:
         color_hi = (color >> 8) & 0xFF
         color_lo = color & 0xFF
         row_size = w * 2
+        fb = self._fb_mv
+        fill_buf = self._fill_mv
+
+        for i in range(0, row_size, 2):
+            fill_buf[i] = color_hi
+            fill_buf[i + 1] = color_lo
 
         for py in range(y, y + h):
             offset = (py * self._fb_width + x) * 2
-            self._framebuffer[offset : offset + row_size] = bytes([color_hi, color_lo]) * w
+            fb[offset : offset + row_size] = fill_buf[:row_size]
 
         self._fb_dirty = True
 
+    @micropython.native
     def _fb_fill_h_line(self, x1, x2, y, color):
         """快速填充水平线（优化版）"""
         if y < 0 or y >= self._fb_height:
@@ -158,9 +171,17 @@ class NV3007:
         w = x2 - x1 + 1
         offset = (y * self._fb_width + x1) * 2
 
-        self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+        fb = self._fb_mv
+        fill_buf = self._fill_mv
+
+        for i in range(0, w * 2, 2):
+            fill_buf[i] = color_hi
+            fill_buf[i + 1] = color_lo
+
+        fb[offset : offset + w * 2] = fill_buf[:w * 2]
         self._fb_dirty = True
 
+    @micropython.native
     def _fb_fill_v_line(self, x, y1, y2, color):
         """快速填充垂直线（优化版）"""
         if x < 0 or x >= self._fb_width:
@@ -176,11 +197,12 @@ class NV3007:
 
         color_hi = (color >> 8) & 0xFF
         color_lo = color & 0xFF
+        fb = self._fb_mv
 
         for py in range(y1, y2 + 1):
             offset = (py * self._fb_width + x) * 2
-            self._framebuffer[offset] = color_hi
-            self._framebuffer[offset + 1] = color_lo
+            fb[offset] = color_hi
+            fb[offset + 1] = color_lo
 
         self._fb_dirty = True
 
@@ -636,14 +658,20 @@ class NV3007:
                     if x_start <= x_end:
                         self._fb_fill_h_line(x_start, x_end, py, color)
 
+    @micropython.native
     def draw_circle(self, xc, yc, r, color, filled=False):
         """画圆（极致优化版）"""
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        fill_buf = self._fill_mv
+
         if filled:
             y_start = max(0, yc - r)
-            y_end = min(yc + r, self._fb_height - 1)
+            y_end = min(yc + r, fb_height - 1)
 
             color_hi = (color >> 8) & 0xFF
             color_lo = color & 0xFF
@@ -655,16 +683,23 @@ class NV3007:
                 if dy2 <= r2:
                     dx_max = int(math.sqrt(r2 - dy2))
                     x_start = max(0, xc - dx_max)
-                    x_end = min(xc + dx_max, self._fb_width - 1)
+                    x_end = min(xc + dx_max, fb_width - 1)
                     if x_start <= x_end:
                         w = x_end - x_start + 1
-                        offset = (py * self._fb_width + x_start) * 2
-                        self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+                        offset = (py * fb_width + x_start) * 2
+
+                        for i in range(0, w * 2, 2):
+                            fill_buf[i] = color_hi
+                            fill_buf[i + 1] = color_lo
+
+                        fb[offset : offset + w * 2] = fill_buf[:w * 2]
             self._fb_dirty = True
         else:
             x = 0
             y = r
             d = 3 - 2 * r
+            color_hi = (color >> 8) & 0xFF
+            color_lo = color & 0xFF
 
             while y >= x:
                 points = [
@@ -675,10 +710,10 @@ class NV3007:
                 ]
 
                 for px, py in points:
-                    if 0 <= px < self._fb_width and 0 <= py < self._fb_height:
-                        offset = (py * self._fb_width + px) * 2
-                        self._framebuffer[offset] = (color >> 8) & 0xFF
-                        self._framebuffer[offset + 1] = color & 0xFF
+                    if 0 <= px < fb_width and 0 <= py < fb_height:
+                        offset = (py * fb_width + px) * 2
+                        fb[offset] = color_hi
+                        fb[offset + 1] = color_lo
 
                 x += 1
                 if d > 0:
@@ -909,21 +944,27 @@ class NV3007:
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
-        font_height = self._font.height()
+        font = self._font
+        font_height = font.height()
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        color_hi = (fg_color >> 8) & 0xFF
+        color_lo = fg_color & 0xFF
 
         cur_x = x
         for ch in text:
-            bitmap, ch_height, ch_width = self._font.get_ch(ch)
+            bitmap, ch_height, ch_width = font.get_ch(ch)
             bytes_per_row = (ch_width + 7) // 8
 
             for row in range(ch_height):
                 py = y + row
-                if py < 0 or py >= self._fb_height:
+                if py < 0 or py >= fb_height:
                     continue
 
                 for col in range(ch_width):
                     px = cur_x + col
-                    if px < 0 or px >= self._fb_width:
+                    if px < 0 or px >= fb_width:
                         continue
 
                     byte_idx = row * bytes_per_row + (col // 8)
@@ -935,7 +976,9 @@ class NV3007:
                         pixel_set = 0
 
                     if pixel_set:
-                        self._fb_set_pixel_unsafe(px, py, fg_color)
+                        offset = (py * fb_width + px) * 2
+                        fb[offset] = color_hi
+                        fb[offset + 1] = color_lo
 
             cur_x += ch_width
 
