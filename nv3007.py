@@ -65,13 +65,13 @@ class NV3007:
             height: 屏幕高度
             rotation: 屏幕旋转方向 (0-3) 0或1为竖屏 2或3为横屏
         """
-        self.spi = spi
-        self.cs = cs if isinstance(cs, Pin) else Pin(cs, Pin.OUT, value=1)
-        self.dc = dc if isinstance(dc, Pin) else Pin(dc, Pin.OUT, value=1)
-        self.rst = rst if isinstance(rst, Pin) else Pin(rst, Pin.OUT, value=1)
-        self.blk = blk if isinstance(blk, Pin) else Pin(blk, Pin.OUT, value=0)
+        self._spi = spi
+        self._cs = cs if isinstance(cs, Pin) else Pin(cs, Pin.OUT, value=1)
+        self._dc = dc if isinstance(dc, Pin) else Pin(dc, Pin.OUT, value=1)
+        self._rst = rst if isinstance(rst, Pin) else Pin(rst, Pin.OUT, value=1)
+        self._blk = blk if isinstance(blk, Pin) else Pin(blk, Pin.OUT, value=0)
 
-        self.rotation = rotation
+        self._rotation = rotation
         if rotation == 0 or rotation == 1:
             self.width = width
             self.height = height
@@ -93,32 +93,32 @@ class NV3007:
 
     def _write_reg(self, reg):
         """写寄存器命令"""
-        self.dc.value(0)
-        self.cs.value(0)
-        self.spi.write(bytes([reg]))
-        self.cs.value(1)
-        self.dc.value(1)
+        self._dc.value(0)
+        self._cs.value(0)
+        self._spi.write(bytes([reg]))
+        self._cs.value(1)
+        self._dc.value(1)
 
     def _write_data(self, dat):
         """写数据"""
-        self.dc.value(1)
-        self.cs.value(0)
-        self.spi.write(bytes([dat]))
-        self.cs.value(1)
+        self._dc.value(1)
+        self._cs.value(0)
+        self._spi.write(bytes([dat]))
+        self._cs.value(1)
 
     def _write_data16(self, dat):
         """写16位（半字）数据"""
-        self.dc.value(1)
-        self.cs.value(0)
-        self.spi.write(bytes([(dat >> 8) & 0xFF, dat & 0xFF]))
-        self.cs.value(1)
+        self._dc.value(1)
+        self._cs.value(0)
+        self._spi.write(bytes([(dat >> 8) & 0xFF, dat & 0xFF]))
+        self._cs.value(1)
 
     def _write_buffer(self, buffer):
         """写缓冲区数据"""
-        self.dc.value(1)
-        self.cs.value(0)
-        self.spi.write(buffer)
-        self.cs.value(1)
+        self._dc.value(1)
+        self._cs.value(0)
+        self._spi.write(buffer)
+        self._cs.value(1)
 
     def _fb_set_pixel(self, x, y, color):
         """在framebuffer中设置像素点（带边界检查）"""
@@ -225,7 +225,7 @@ class NV3007:
 
     def _set_address(self, xs, ys, xe, ye):
         """设置显示区域"""
-        if self.rotation == 0:
+        if self._rotation == 0:
             self._write_reg(0x2A)
             self._write_data16(xs + 12)
             self._write_data16(xe + 12)
@@ -233,7 +233,7 @@ class NV3007:
             self._write_data16(ys)
             self._write_data16(ye)
             self._write_reg(0x2C)
-        elif self.rotation == 1:
+        elif self._rotation == 1:
             self._write_reg(0x2A)
             self._write_data16(xs + 14)
             self._write_data16(xe + 14)
@@ -241,7 +241,7 @@ class NV3007:
             self._write_data16(ys)
             self._write_data16(ye)
             self._write_reg(0x2C)
-        elif self.rotation == 2:
+        elif self._rotation == 2:
             self._write_reg(0x2A)
             self._write_data16(xs)
             self._write_data16(xe)
@@ -261,13 +261,13 @@ class NV3007:
     @micropython.native
     def _init_display(self):
         """初始化显示序列"""
-        self.rst.value(1)
+        self._rst.value(1)
         time.sleep_ms(50)
-        self.rst.value(0)
+        self._rst.value(0)
         time.sleep_ms(50)
-        self.rst.value(1)
+        self._rst.value(1)
         time.sleep_ms(120)
-        self.blk.value(1)
+        self._blk.value(1)
 
         # 解锁并配置寄存器
         self._write_reg(0xFF)
@@ -529,11 +529,11 @@ class NV3007:
 
         # 设置旋转方向
         self._write_reg(0x36)
-        if self.rotation == 0:
+        if self._rotation == 0:
             self._write_data(0x00)
-        elif self.rotation == 1:
+        elif self._rotation == 1:
             self._write_data(0xC0)
-        elif self.rotation == 2:
+        elif self._rotation == 2:
             self._write_data(0x60)
         else:
             self._write_data(0xA0)
@@ -1147,9 +1147,9 @@ class NV3007:
     def set_backlight(self, value):
         """设置背光亮度 (0-1)"""
         if value > 0:
-            self.blk.value(1)
+            self._blk.value(1)
         else:
-            self.blk.value(0)
+            self._blk.value(0)
 
     def sleep(self):
         """进入睡眠模式"""
