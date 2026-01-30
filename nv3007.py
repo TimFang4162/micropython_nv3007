@@ -241,6 +241,7 @@ class NV3007:
             self._write_data16(ye + 12)
             self._write_reg(0x2C)
 
+    @micropython.native
     def _init_display(self):
         """初始化显示序列"""
         self.rst.value(1)
@@ -525,6 +526,7 @@ class NV3007:
         self._write_reg(0x29)
         time.sleep_ms(200)
 
+    @micropython.native
     def flush(self):
         """将framebuffer内容提交到屏幕"""
         if not self._fb_dirty:
@@ -540,7 +542,7 @@ class NV3007:
         """设置自动刷新模式"""
         self._auto_flush = enable
 
-    def clear(self, color=WHITE):
+    def clear(self, color=BLACK):
         """清屏（优化版）"""
         self._fb_fill_rect(0, 0, self.width, self.height, color)
         if self._auto_flush:
@@ -945,7 +947,6 @@ class NV3007:
         self._auto_flush = False
 
         font = self._font
-        font_height = font.height()
         fb = self._fb_mv
         fb_width = self._fb_width
         fb_height = self._fb_height
@@ -956,27 +957,31 @@ class NV3007:
         for ch in text:
             bitmap, ch_height, ch_width = font.get_ch(ch)
             bytes_per_row = (ch_width + 7) // 8
+            bitmap_mv = memoryview(bitmap)
 
             for row in range(ch_height):
                 py = y + row
                 if py < 0 or py >= fb_height:
                     continue
 
+                row_offset = py * fb_width
+                bitmap_row_offset = row * bytes_per_row
+
                 for col in range(ch_width):
                     px = cur_x + col
                     if px < 0 or px >= fb_width:
                         continue
 
-                    byte_idx = row * bytes_per_row + (col // 8)
+                    byte_idx = bitmap_row_offset + (col // 8)
                     bit_pos = 7 - (col % 8)
 
-                    if byte_idx < len(bitmap):
-                        pixel_set = (bitmap[byte_idx] >> bit_pos) & 1
+                    if byte_idx < len(bitmap_mv):
+                        pixel_set = (bitmap_mv[byte_idx] >> bit_pos) & 1
                     else:
                         pixel_set = 0
 
                     if pixel_set:
-                        offset = (py * fb_width + px) * 2
+                        offset = (row_offset + px) * 2
                         fb[offset] = color_hi
                         fb[offset + 1] = color_lo
 

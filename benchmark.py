@@ -1,9 +1,11 @@
 """
 NV3007 LCD 绘制性能基准测试
 分析各绘制操作的性能瓶颈
+输出 CSV 格式便于在 Excel 中对比
 """
 
 from nv3007 import NV3007
+import font_wqy_16
 import time
 from machine import Pin, SPI
 # 创建屏幕实例
@@ -18,6 +20,7 @@ spi = SPI(
 )
 
 lcd = NV3007(spi, 17, 20, 21, 14, 142, 428, 0)
+lcd.set_font(font_wqy_16)
 
 def benchmark(name, func, iterations=10, setup_func=None):
     """运行性能测试
@@ -47,7 +50,39 @@ def benchmark(name, func, iterations=10, setup_func=None):
     avg_time = sum(times) // iterations
     min_time = min(times)
     max_time = max(times)
-    print(f"{name:40s} | 平均: {avg_time:4d}ms | 最小: {min_time:4d}ms | 最大: {max_time:4d}ms | 迭代: {iterations}")
+    # CSV 格式输出
+    print(f"{name},{avg_time},{min_time},{max_time},{iterations}")
+
+def benchmark(name, func, iterations=10, setup_func=None):
+    """运行性能测试
+
+    参数:
+        name: 测试名称
+        func: 测试函数
+        iterations: 迭代次数
+        setup_func: 每次迭代前的设置函数
+    """
+    if setup_func is None:
+        setup_func = lambda: None
+
+    # 预热
+    setup_func()
+    func()
+
+    # 实际测试
+    times = []
+    for i in range(iterations):
+        setup_func()
+        start = time.ticks_ms()
+        func()
+        elapsed = time.ticks_diff(time.ticks_ms(), start)
+        times.append(elapsed)
+
+    avg_time = sum(times) // iterations
+    min_time = min(times)
+    max_time = max(times)
+    # CSV 格式输出
+    print(f"{name},{avg_time},{min_time},{max_time},{iterations}")
 
 def benchmark_compare(name, func_auto, func_manual, iterations=10, setup_func=None):
     """对比自动刷新和手动刷新的性能
@@ -90,15 +125,16 @@ def benchmark_compare(name, func_auto, func_manual, iterations=10, setup_func=No
     avg_manual = sum(times_manual) // iterations
     improvement = ((avg_auto - avg_manual) / avg_auto) * 100 if avg_auto > 0 else 0
 
-    print(f"{name:40s} | 自动: {avg_auto:4d}ms | 手动: {avg_manual:4d}ms | 提升: {improvement:5.1f}% | 迭代: {iterations}")
+    # CSV 格式输出
+    print(f"{name}(自动),{avg_auto},-,-,{iterations}")
+    print(f"{name}(手动),{avg_manual},-,-,{iterations}")
 
-print("=" * 100)
 print("NV3007 LCD 绘制性能基准测试")
 print(f"屏幕分辨率: {lcd.width}x{lcd.height}")
-print("=" * 100)
+# CSV 表头
+print("测试名称,平均时间(ms),最小时间(ms),最大时间(ms),迭代次数")
 
 print("\n【基础操作】")
-print("-" * 100)
 
 benchmark(
     "清屏 (白色)",
@@ -113,7 +149,6 @@ benchmark(
 )
 
 print("\n【像素点绘制】")
-print("-" * 100)
 
 def setup_100_pixels():
     lcd.clear(NV3007.BLACK)
@@ -149,7 +184,6 @@ benchmark(
 )
 
 print("\n【直线绘制】")
-print("-" * 100)
 
 def setup_line():
     lcd.clear(NV3007.BLACK)
@@ -174,7 +208,6 @@ benchmark("绘制5条对角线", lambda: (lcd.set_auto_flush(False), test_diagon
           iterations=10, setup_func=setup_line)
 
 print("\n【矩形绘制】")
-print("-" * 100)
 
 def setup_rect():
     lcd.clear(NV3007.BLACK)
@@ -207,7 +240,6 @@ benchmark("4个大矩形 (填充)", lambda: (lcd.set_auto_flush(False), test_lar
           iterations=10, setup_func=setup_rect)
 
 print("\n【圆角矩形绘制】")
-print("-" * 100)
 
 def setup_round_rect():
     lcd.clear(NV3007.BLACK)
@@ -238,7 +270,6 @@ benchmark("2个圆角矩形 半径=20 (填充)", lambda: (lcd.set_auto_flush(Fal
           iterations=5, setup_func=setup_round_rect)
 
 print("\n【圆形绘制】")
-print("-" * 100)
 
 def setup_circle():
     lcd.clear(NV3007.BLACK)
@@ -271,7 +302,6 @@ benchmark("2个大圆 (填充)", lambda: (lcd.set_auto_flush(False), test_large_
           iterations=5, setup_func=setup_circle)
 
 print("\n【弧绘制】")
-print("-" * 100)
 
 def setup_arc():
     lcd.clear(NV3007.BLACK)
@@ -290,7 +320,6 @@ benchmark("5个半圆弧 (填充)", lambda: (lcd.set_auto_flush(False), test_arc
           iterations=10, setup_func=setup_arc)
 
 print("\n【椭圆绘制】")
-print("-" * 100)
 
 def setup_ellipse():
     lcd.clear(NV3007.BLACK)
@@ -309,7 +338,6 @@ benchmark("2个椭圆 (填充)", lambda: (lcd.set_auto_flush(False), test_ellips
           iterations=5, setup_func=setup_ellipse)
 
 print("\n【多边形绘制】")
-print("-" * 100)
 
 def setup_polygon():
     lcd.clear(NV3007.BLACK)
@@ -346,7 +374,6 @@ benchmark("5个五边形 (填充)", lambda: (lcd.set_auto_flush(False), test_pen
           iterations=5, setup_func=setup_polygon)
 
 print("\n【位图绘制】")
-print("-" * 100)
 
 def setup_bitmap():
     lcd.clear(NV3007.BLACK)
@@ -384,7 +411,6 @@ benchmark("954个8x8 RGB565位图", lambda: (lcd.set_auto_flush(False), test_bit
           iterations=3, setup_func=setup_bitmap)
 
 print("\n【混合场景测试】")
-print("-" * 100)
 
 def setup_mixed():
     lcd.clear(NV3007.WHITE)
@@ -448,11 +474,46 @@ def test_complex_scene():
             colors = [NV3007.YELLOW, NV3007.CYAN]
             lcd.draw_rect(x, y, 40, 15, colors[i], radius=3, filled=True)
 
-benchmark("复杂场景 (网格+12圆+6矩形)", lambda: (lcd.set_auto_flush(False), test_complex_scene(), lcd.flush())[2],
-          iterations=5, setup_func=setup_complex)
+    benchmark("复杂场景 (网格+12圆+6矩形)", lambda: (lcd.set_auto_flush(False), test_complex_scene(), lcd.flush())[2],
+           iterations=5, setup_func=setup_complex)
+
+print("\n【文本渲染测试】")
+
+def setup_text():
+    lcd.clear(NV3007.BLACK)
+
+def test_text_short():
+    for i in range(10):
+        y = 20 + i * 40
+        lcd.draw_text(10, y, "强制Viper", NV3007.WHITE)
+
+def test_text_medium():
+    for i in range(5):
+        y = 20 + i * 80
+        lcd.draw_text(10, y, "本地的 Viper 变量", NV3007.WHITE)
+
+def test_text_long():
+    for i in range(3):
+        y = 20 + i * 130
+        lcd.draw_text(10, y, "强制转换的结果将是一个本地的 Viper 变量。", NV3007.WHITE)
+
+def test_text_multiline():
+    for i in range(5):
+        y = 20 + i * 80
+        lcd.draw_text(10, y, "第一行", NV3007.WHITE)
+        lcd.draw_text(10, y + 20, "第二行", NV3007.WHITE)
+        lcd.draw_text(10, y + 40, "第三行", NV3007.WHITE)
+
+benchmark("10次短文本(5字符)", lambda: (lcd.set_auto_flush(False), test_text_short(), lcd.flush())[2],
+           iterations=5, setup_func=setup_text)
+benchmark("5次中长文本(10字符)", lambda: (lcd.set_auto_flush(False), test_text_medium(), lcd.flush())[2],
+           iterations=5, setup_func=setup_text)
+benchmark("3次长文本(15字符)", lambda: (lcd.set_auto_flush(False), test_text_long(), lcd.flush())[2],
+           iterations=5, setup_func=setup_text)
+benchmark("5次多行文本(3行x5字符)", lambda: (lcd.set_auto_flush(False), test_text_multiline(), lcd.flush())[2],
+           iterations=5, setup_func=setup_text)
 
 print("\n【性能瓶颈分析】")
-print("-" * 100)
 
 def analyze_pixel_operations():
     """分析单像素操作的性能"""
@@ -479,17 +540,15 @@ def analyze_pixel_operations():
     lcd.flush()
     flush_time = time.ticks_diff(time.ticks_ms(), start)
 
-    print(f"10000次_fb_set_pixel:        {set_pixel_time:4d}ms")
-    print(f"10000次直接写入framebuffer: {direct_write_time:4d}ms")
-    print(f"flush()完整屏幕:             {flush_time:4d}ms")
-    print(f"每像素设置开销:             {set_pixel_time / 10000:.3f}ms")
-    print(f"边界检查开销:               {set_pixel_time - direct_write_time:.0f}ms")
+    print(f"10000次_fb_set_pixel,{set_pixel_time},-,-,10000")
+    print(f"10000次直接写入framebuffer,{direct_write_time},-,-,10000")
+    print(f"flush()完整屏幕,{flush_time},-,-,1")
+    print(f"每像素设置开销,{set_pixel_time / 10000:.3f},-,-,-")
+    print(f"边界检查开销,{set_pixel_time - direct_write_time:.0f},-,-,-")
 
-analyze_pixel_operations()
+    analyze_pixel_operations()
 
-print("\n" + "=" * 100)
-print("基准测试完成")
-print("=" * 100)
+print("\n基准测试完成")
 
 # 恢复自动刷新
 lcd.set_auto_flush(True)
