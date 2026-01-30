@@ -8,6 +8,23 @@ import gc
 import micropython
 from machine import SPI, Pin
 
+def _viper_set_pixel(fb, fb_width, x, y, color_hi, color_lo):
+    """Viper优化的像素设置（内联辅助函数）"""
+    offset = (y * fb_width + x) * 2
+    fb[offset] = color_hi
+    fb[offset + 1] = color_lo
+
+def _viper_fill_row(fb, fb_width, y, x_start, x_end, color_hi, color_lo):
+    """Viper优化的行填充"""
+    offset = (y * fb_width + x_start) * 2
+    w = x_end - x_start + 1
+    for i in range(w * 2):
+        if (i & 1) == 0:
+            fb[offset + i] = color_hi
+        else:
+            fb[offset + i] = color_lo
+
+
 class NV3007:
     """NV3007 LCD driver class"""
 
@@ -533,9 +550,11 @@ class NV3007:
             return
         self._set_address(0, 0, self.width - 1, self.height - 1)
         chunk_size = 2048
-        for i in range(0, len(self._framebuffer), chunk_size):
-            chunk = self._framebuffer[i : i + chunk_size]
-            self._write_buffer(chunk)
+        fb_mv = self._fb_mv
+        write = self._write_buffer
+        total_len = len(fb_mv)
+        for i in range(0, total_len, chunk_size):
+            write(fb_mv[i:i + chunk_size])
         self._fb_dirty = False
 
     def set_auto_flush(self, enable):
@@ -561,8 +580,18 @@ class NV3007:
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
         err = dx - dy
+
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+
         while True:
-            self._fb_set_pixel(x1, y1, color)
+            if 0 <= x1 < fb_width and 0 <= y1 < fb_height:
+                offset = (y1 * fb_width + x1) * 2
+                fb[offset] = color_hi
+                fb[offset + 1] = color_lo
             if x1 == x2 and y1 == y2:
                 break
             e2 = 2 * err
@@ -704,18 +733,49 @@ class NV3007:
             color_lo = color & 0xFF
 
             while y >= x:
-                points = [
-                    (xc + x, yc + y), (xc - x, yc + y),
-                    (xc + x, yc - y), (xc - x, yc - y),
-                    (xc + y, yc + x), (xc - y, yc + x),
-                    (xc + y, yc - x), (xc - y, yc - x)
-                ]
+                px1 = xc + x
+                px2 = xc - x
+                py1 = yc + y
+                py2 = yc - y
 
-                for px, py in points:
-                    if 0 <= px < fb_width and 0 <= py < fb_height:
-                        offset = (py * fb_width + px) * 2
-                        fb[offset] = color_hi
-                        fb[offset + 1] = color_lo
+                if 0 <= px1 < fb_width and 0 <= py1 < fb_height:
+                    offset = (py1 * fb_width + px1) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px2 < fb_width and 0 <= py1 < fb_height:
+                    offset = (py1 * fb_width + px2) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px1 < fb_width and 0 <= py2 < fb_height:
+                    offset = (py2 * fb_width + px1) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px2 < fb_width and 0 <= py2 < fb_height:
+                    offset = (py2 * fb_width + px2) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+
+                px1 = xc + y
+                px2 = xc - y
+                py1 = yc + x
+                py2 = yc - x
+
+                if 0 <= px1 < fb_width and 0 <= py1 < fb_height:
+                    offset = (py1 * fb_width + px1) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px2 < fb_width and 0 <= py1 < fb_height:
+                    offset = (py1 * fb_width + px2) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px1 < fb_width and 0 <= py2 < fb_height:
+                    offset = (py2 * fb_width + px1) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
+                if 0 <= px2 < fb_width and 0 <= py2 < fb_height:
+                    offset = (py2 * fb_width + px2) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
 
                 x += 1
                 if d > 0:
@@ -732,39 +792,59 @@ class NV3007:
 
     def draw_arc(self, xc, yc, r, start_angle, end_angle, color, filled=False):
         """画弧（优化版）"""
-        points = []
+        angle_diff = end_angle - start_angle
         steps = max(1, int(r * 2 * 3.14159 / 5))
-        for i in range(steps + 1):
-            angle = start_angle + (end_angle - start_angle) * i / steps
-            px = int(xc + r * math.cos(angle))
-            py = int(yc + r * math.sin(angle))
-            points.append((px, py))
-        if filled:
-            points.append((xc, yc))
+        angle_step = angle_diff / steps
+
         old_auto_flush = self._auto_flush
         self._auto_flush = False
-        for i in range(len(points) - 1):
-            px1, py1 = points[i]
-            px2, py2 = points[i + 1]
-            dx = abs(px2 - px1)
-            dy = abs(py2 - py1)
-            sx = 1 if px1 < px2 else -1
-            sy = 1 if py1 < py2 else -1
-            err = dx - dy
-            while True:
-                if 0 <= px1 < self._fb_width and 0 <= py1 < self._fb_height:
-                    self._fb_set_pixel_unsafe(px1, py1, color)
-                if px1 == px2 and py1 == py2:
-                    break
-                e2 = 2 * err
-                if e2 > -dy:
-                    err -= dy
-                    px1 += sx
-                if e2 < dx:
-                    err += dx
-                    py1 += sy
+
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+
+        prev_px = 0
+        prev_py = 0
+        first = True
+
+        for i in range(steps + 1):
+            angle = start_angle + angle_step * i
+            px = int(xc + r * math.cos(angle))
+            py = int(yc + r * math.sin(angle))
+
+            if not first:
+                dx = abs(px - prev_px)
+                dy = abs(py - prev_py)
+                sx = 1 if prev_px < px else -1
+                sy = 1 if prev_py < py else -1
+                err = dx - dy
+                x, y = prev_px, prev_py
+                while True:
+                    if 0 <= x < fb_width and 0 <= y < fb_height:
+                        offset = (y * fb_width + x) * 2
+                        fb[offset] = color_hi
+                        fb[offset + 1] = color_lo
+                    if x == px and y == py:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dy:
+                        err -= dy
+                        x += sx
+                    if e2 < dx:
+                        err += dx
+                        y += sy
+            else:
+                first = False
+
+            prev_px = px
+            prev_py = py
+
         if filled:
-            self.draw_polygon(points, color, filled=True)
+            self.draw_polygon([(xc, yc)] + [(int(xc + r * math.cos(start_angle + angle_step * i)),
+                                              int(yc + r * math.sin(start_angle + angle_step * i)))
+                                             for i in range(steps + 1)], color, filled=True)
         self._auto_flush = old_auto_flush
         if self._auto_flush:
             self.flush()
@@ -774,36 +854,45 @@ class NV3007:
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+
         if filled:
             y_start = max(0, yc - ry)
-            y_end = min(yc + ry, self._fb_height - 1)
+            y_end = min(yc + ry, fb_height - 1)
 
-            color_hi = (color >> 8) & 0xFF
-            color_lo = color & 0xFF
             ry2 = ry * ry
+            inv_ry2 = 1.0 / ry2
+            rx_sq = rx * rx
 
             for py in range(y_start, y_end + 1):
                 dy = py - yc
                 dy2 = dy * dy
                 if dy2 <= ry2:
-                    dx_max = int(rx * math.sqrt(1 - dy2 / ry2))
+                    dx_max = int(rx * math.sqrt(1.0 - dy2 * inv_ry2))
                     x_start = max(0, xc - dx_max)
-                    x_end = min(xc + dx_max, self._fb_width - 1)
+                    x_end = min(xc + dx_max, fb_width - 1)
                     if x_start <= x_end:
                         w = x_end - x_start + 1
-                        offset = (py * self._fb_width + x_start) * 2
-                        self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+                        offset = (py * fb_width + x_start) * 2
+
+                        for i in range(0, w * 2, 2):
+                            fb[offset + i] = color_hi
+                            fb[offset + i + 1] = color_lo
             self._fb_dirty = True
         else:
-            steps = max(1, int(max(rx, ry) * 2 * 3.14159 / 5))
+            steps = max(1, int(max(rx, ry) * 6.28318 / 5))
             for i in range(steps):
-                angle = 2 * 3.14159 * i / steps
+                angle = 6.28318 * i / steps
                 px = int(xc + rx * math.cos(angle))
                 py = int(yc + ry * math.sin(angle))
-                if 0 <= px < self._fb_width and 0 <= py < self._fb_height:
-                    offset = (py * self._fb_width + px) * 2
-                    self._framebuffer[offset] = (color >> 8) & 0xFF
-                    self._framebuffer[offset + 1] = color & 0xFF
+                if 0 <= px < fb_width and 0 <= py < fb_height:
+                    offset = (py * fb_width + px) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
             self._fb_dirty = True
 
         self._auto_flush = old_auto_flush
@@ -821,6 +910,13 @@ class NV3007:
             return
         old_auto_flush = self._auto_flush
         self._auto_flush = False
+
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        color_hi = (color >> 8) & 0xFF
+        color_lo = color & 0xFF
+
         if not filled:
             for i in range(n):
                 x1, y1 = vertices[i]
@@ -831,8 +927,10 @@ class NV3007:
                 sy = 1 if y1 < y2 else -1
                 err = dx - dy
                 while True:
-                    if 0 <= x1 < self._fb_width and 0 <= y1 < self._fb_height:
-                        self._fb_set_pixel_unsafe(x1, y1, color)
+                    if 0 <= x1 < fb_width and 0 <= y1 < fb_height:
+                        offset = (y1 * fb_width + x1) * 2
+                        fb[offset] = color_hi
+                        fb[offset + 1] = color_lo
                     if x1 == x2 and y1 == y2:
                         break
                     e2 = 2 * err
@@ -843,30 +941,50 @@ class NV3007:
                         err += dx
                         y1 += sy
         else:
-            min_y = max(0, min(v[1] for v in vertices))
-            max_y = min(max(v[1] for v in vertices), self._fb_height - 1)
+            min_y = fb_height
+            max_y = -1
+            for v in vertices:
+                y = v[1]
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
 
-            color_hi = (color >> 8) & 0xFF
-            color_lo = color & 0xFF
+            y_start = max(0, min_y)
+            y_end = min(fb_height - 1, max_y)
 
-            for y in range(min_y, max_y + 1):
+            v0 = vertices[0]
+            v_prev = v0
+            intersections0 = []
+            intersections1 = []
+
+            for y in range(y_start, y_end + 1):
                 intersections = []
                 for i in range(n):
-                    x1, y1 = vertices[i]
-                    x2, y2 = vertices[(i + 1) % n]
+                    v_curr = vertices[i]
+                    x1, y1 = v_prev
+                    x2, y2 = v_curr
+                    v_prev = v_curr
                     if (y1 <= y < y2) or (y2 <= y < y1):
                         if y1 != y2:
                             x = x1 + (y - y1) * (x2 - x1) // (y2 - y1)
                             intersections.append(x)
+
                 intersections.sort()
-                for i in range(0, len(intersections), 2):
+                for i in range(0, len(intersections) - 1, 2):
                     if i + 1 < len(intersections):
-                        x_start = max(0, min(intersections[i], self._fb_width - 1))
-                        x_end = max(0, min(intersections[i + 1], self._fb_width - 1))
+                        x_start = intersections[i]
+                        x_end = intersections[i + 1]
+                        if x_start > x_end:
+                            x_start, x_end = x_end, x_start
+                        x_start = max(0, x_start)
+                        x_end = min(fb_width - 1, x_end)
                         if x_start <= x_end:
                             w = x_end - x_start + 1
-                            offset = (y * self._fb_width + x_start) * 2
-                            self._framebuffer[offset : offset + w * 2] = bytes([color_hi, color_lo]) * w
+                            offset = (y * fb_width + x_start) * 2
+                            for i in range(0, w * 2, 2):
+                                fb[offset + i] = color_hi
+                                fb[offset + i + 1] = color_lo
 
             self._fb_dirty = True
         self._auto_flush = old_auto_flush
@@ -875,26 +993,45 @@ class NV3007:
 
     def draw_bitmap(self, x, y, bitmap, w, h, color):
         """画位图（优化版）"""
-        if not isinstance(bitmap, bytes):
-            bitmap = bytes(bitmap)
+        if isinstance(bitmap, memoryview):
+            bitmap_mv = bitmap
+        elif isinstance(bitmap, bytes):
+            bitmap_mv = memoryview(bitmap)
+        else:
+            bitmap_mv = memoryview(bytes(bitmap))
+
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
-        rows = (h + 7) // 8
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
         color_hi = (color >> 8) & 0xFF
         color_lo = color & 0xFF
 
+        rows = (h + 7) // 8
+        bitmap_len = len(bitmap_mv)
+
         for row in range(h):
-            byte_row = row // 8
-            bit_offset = 7 - (row % 8)
+            py = y + row
+            if py < 0 or py >= fb_height:
+                continue
+
+            byte_row = row >> 3
+            bit_offset = 7 - (row & 7)
+            row_offset = py * fb_width
+            base_idx = byte_row * w
+
             for col in range(w):
-                byte_index = byte_row * w + col
-                if byte_index < len(bitmap) and (bitmap[byte_index] >> bit_offset) & 1:
-                    px, py = x + col, y + row
-                    if 0 <= px < self._fb_width and 0 <= py < self._fb_height:
-                        offset = (py * self._fb_width + px) * 2
-                        self._framebuffer[offset] = color_hi
-                        self._framebuffer[offset + 1] = color_lo
+                px = x + col
+                if px < 0 or px >= fb_width:
+                    continue
+
+                byte_idx = base_idx + col
+                if byte_idx < bitmap_len and (bitmap_mv[byte_idx] >> bit_offset) & 1:
+                    offset = (row_offset + px) * 2
+                    fb[offset] = color_hi
+                    fb[offset + 1] = color_lo
 
         self._fb_dirty = True
         self._auto_flush = old_auto_flush
@@ -903,22 +1040,39 @@ class NV3007:
 
     def draw_bitmap_rgb565(self, x, y, bitmap, w, h):
         """画RGB565位图（优化版）"""
-        if not isinstance(bitmap, bytes):
-            bitmap = bytes(bitmap)
+        if isinstance(bitmap, memoryview):
+            bitmap_mv = bitmap
+        elif isinstance(bitmap, bytes):
+            bitmap_mv = memoryview(bitmap)
+        else:
+            bitmap_mv = memoryview(bytes(bitmap))
+
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
+        fb = self._fb_mv
+        fb_width = self._fb_width
+        fb_height = self._fb_height
+        bitmap_len = len(bitmap_mv)
+
         for row in range(h):
-            if y + row < 0 or y + row >= self._fb_height:
+            py = y + row
+            if py < 0 or py >= fb_height:
                 continue
+
+            row_offset = py * fb_width
+            base_idx = row * w * 2
+
             for col in range(w):
-                if x + col < 0 or x + col >= self._fb_width:
+                px = x + col
+                if px < 0 or px >= fb_width:
                     continue
-                index = (row * w + col) * 2
-                if index + 1 < len(bitmap):
-                    offset = ((y + row) * self._fb_width + (x + col)) * 2
-                    self._framebuffer[offset] = bitmap[index]
-                    self._framebuffer[offset + 1] = bitmap[index + 1]
+
+                idx = base_idx + col * 2
+                if idx + 1 < bitmap_len:
+                    offset = (row_offset + px) * 2
+                    fb[offset] = bitmap_mv[idx]
+                    fb[offset + 1] = bitmap_mv[idx + 1]
 
         self._fb_dirty = True
         self._auto_flush = old_auto_flush
@@ -956,8 +1110,11 @@ class NV3007:
         cur_x = x
         for ch in text:
             bitmap, ch_height, ch_width = font.get_ch(ch)
-            bytes_per_row = (ch_width + 7) // 8
-            bitmap_mv = memoryview(bitmap)
+            if isinstance(bitmap, memoryview):
+                bitmap_mv = bitmap
+            else:
+                bitmap_mv = memoryview(bitmap)
+            bytes_per_row = (ch_width + 7) >> 3
 
             for row in range(ch_height):
                 py = y + row
@@ -972,15 +1129,10 @@ class NV3007:
                     if px < 0 or px >= fb_width:
                         continue
 
-                    byte_idx = bitmap_row_offset + (col // 8)
-                    bit_pos = 7 - (col % 8)
+                    byte_idx = bitmap_row_offset + (col >> 3)
+                    bit_pos = 7 - (col & 7)
 
-                    if byte_idx < len(bitmap_mv):
-                        pixel_set = (bitmap_mv[byte_idx] >> bit_pos) & 1
-                    else:
-                        pixel_set = 0
-
-                    if pixel_set:
+                    if byte_idx < len(bitmap_mv) and (bitmap_mv[byte_idx] >> bit_pos) & 1:
                         offset = (row_offset + px) * 2
                         fb[offset] = color_hi
                         fb[offset + 1] = color_lo
