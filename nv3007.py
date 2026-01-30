@@ -61,11 +61,12 @@ class NV3007:
             self.width = height
             self.height = width
 
-        self._fb_width = width
-        self._fb_height = height
+        self._fb_width = self.width
+        self._fb_height = self.height
         self._framebuffer = bytearray(self._fb_width * self._fb_height * 2)
         self._fb_dirty = True
         self._auto_flush = True
+        self._font = None
 
         self._init_display()
 
@@ -881,6 +882,67 @@ class NV3007:
                     offset = ((y + row) * self._fb_width + (x + col)) * 2
                     self._framebuffer[offset] = bitmap[index]
                     self._framebuffer[offset + 1] = bitmap[index + 1]
+
+        self._fb_dirty = True
+        self._auto_flush = old_auto_flush
+        if self._auto_flush:
+            self.flush()
+
+    def set_font(self, font_module):
+        """设置字体模块"""
+        self._font = font_module
+
+    def draw_text(self, x, y, text, fg_color=None, bg_color=None):
+        """绘制文本
+
+        参数:
+            x, y: 文本起始坐标
+            text: 要绘制的文本
+            fg_color: 前景色（默认WHITE）
+            bg_color: 背景色（默认BLACK）
+        """
+        if self._font is None:
+            return
+
+        if fg_color is None:
+            fg_color = self.WHITE
+        if bg_color is None:
+            bg_color = self.BLACK
+
+        old_auto_flush = self._auto_flush
+        self._auto_flush = False
+
+        font_height = self._font.height()
+        bytes_per_row = (font_height + 7) // 8
+
+        cur_x = x
+        for ch in text:
+            bitmap, ch_height, ch_width = self._font.get_ch(ch)
+
+            for row in range(ch_height):
+                py = y + row
+                if py < 0 or py >= self._fb_height:
+                    continue
+
+                for col in range(ch_width):
+                    px = cur_x + col
+                    if px < 0 or px >= self._fb_width:
+                        continue
+
+                    byte_idx = row * bytes_per_row + (col // 8)
+                    bit_pos = 7 - (col % 8)
+
+                    if byte_idx < len(bitmap):
+                        pixel_set = (bitmap[byte_idx] >> bit_pos) & 1
+                    else:
+                        pixel_set = 0
+
+                    if pixel_set:
+                        self._fb_set_pixel_unsafe(px, py, fg_color)
+                    else:
+                        self._fb_set_pixel_unsafe(px, py, bg_color)
+
+            cur_x += ch_width
 
         self._fb_dirty = True
         self._auto_flush = old_auto_flush

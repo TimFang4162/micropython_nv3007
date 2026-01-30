@@ -87,6 +87,39 @@ lcd.fill_circle(xc, yc, r, color)
 lcd.triangle(x1, y1, x2, y2, x3, y3, color, filled=False)
 ```
 
+### 文字渲染
+
+```python
+# 导入字体模块
+import source_han_sans_cn_regular
+
+# 设置字体
+lcd.set_font(source_han_sans_cn_regular)
+
+# 绘制文本（支持中文和英文）
+lcd.draw_text(x, y, "文本内容", fg_color, bg_color)
+
+# 示例：绘制白色文字，黑色背景
+lcd.draw_text(10, 50, "你好世界", NV3007.WHITE, NV3007.BLACK)
+
+# 绘制彩色文字
+lcd.draw_text(10, 100, "MicroPython", NV3007.CYAN, NV3007.BLACK)
+```
+
+#### 字体文件生成
+
+使用 [font_to_py](https://github.com/peterhinch/micropython-font-to-py) 工具生成字体文件：
+
+```bash
+# 生成中文字体（高度24像素，指定字符集）
+font_to_py.py SourceHanSansCN-Regular.otf 24 source_han_sans_cn_regular.py -c 你好世界
+
+# 生成完整ASCII字体
+font_to_py.py FreeSans.ttf 17 freesans20.py
+```
+
+字体文件需要使用水平映射格式（默认），不支持垂直映射。
+
 ### 控制函数
 
 ```python
