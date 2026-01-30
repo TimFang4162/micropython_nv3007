@@ -892,32 +892,29 @@ class NV3007:
         """设置字体模块"""
         self._font = font_module
 
-    def draw_text(self, x, y, text, fg_color=None, bg_color=None):
+    def draw_text(self, x, y, text, fg_color=None):
         """绘制文本
 
         参数:
             x, y: 文本起始坐标
             text: 要绘制的文本
             fg_color: 前景色（默认WHITE）
-            bg_color: 背景色（默认BLACK）
         """
         if self._font is None:
             return
 
         if fg_color is None:
             fg_color = self.WHITE
-        if bg_color is None:
-            bg_color = self.BLACK
 
         old_auto_flush = self._auto_flush
         self._auto_flush = False
 
         font_height = self._font.height()
-        bytes_per_row = (font_height + 7) // 8
 
         cur_x = x
         for ch in text:
             bitmap, ch_height, ch_width = self._font.get_ch(ch)
+            bytes_per_row = (ch_width + 7) // 8
 
             for row in range(ch_height):
                 py = y + row
@@ -939,8 +936,6 @@ class NV3007:
 
                     if pixel_set:
                         self._fb_set_pixel_unsafe(px, py, fg_color)
-                    else:
-                        self._fb_set_pixel_unsafe(px, py, bg_color)
 
             cur_x += ch_width
 
